@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""
+Real-time Facial Emotion Detection using OpenCV Haar Cascade
+This version avoids macOS threading issues by using OpenCV's built-in face detection
+Press 'q' or ESC to quit
+"""
+
+import os
+import sys
+
+# Fix for macOS threading issues - MUST be before importing anything else
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OBJC_DISABLE_INITIALIZE_FORK_SAFETY'] = 'YES'
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
+import warnings
+warnings.filterwarnings('ignore')
+
+from keras.models import load_model
+import numpy as np
+import cv2
+
+# Emotion labels and colors (BGR format for OpenCV)
+emotions = {
+    0: {"emotion": "Angry", "color": (42, 69, 193)},
+    1: {"emotion": "Disgust", "color": (49, 175, 164)},
+    2: {"emotion": "Fear", "color": (155, 52, 40)},
+    3: {"emotion": "Happy", "color": (28, 164, 23)},
+    4: {"emotion": "Sad", "color": (23, 93, 164)},
+    5: {"emotion": "Surprise", "color": (97, 229, 218)},
+    6: {"emotion": "Neutral", "color": (200, 72, 108)}
+}
+
+
+def preprocess_face(face_img, target_size):
+    """Preprocess face image for emotion classification"""
+    face_img = face_img.astype('float32')
+    face_img = face_img / 255.0
+    face_img = (face_img - 0.5) * 2.0
+    face_img = np.expand_dims(face_img, 0)
+    face_img = np.expand_dims(face_img, -1)
+    return face_img
+
+
+def main():
+    print("=" * 60)
+    print("FACIAL EMOTION DETECTION SYSTEM")
+    print("=" * 60)
+
+    # Load Haar Cascade for face detection
+    print("\n[1/3] Loading face detection model...")
+    face_cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+    face_cascade = cv2.CascadeClassifier(face_cascade_path)
+
+    if face_cascade.empty():
+        print(f"ERROR: Could not load Haar Cascade from {face_cascade_path}")
+        sys.exit(1)
+
+    print(" Face detection model loaded (Haar Cascade)")
+
+    # Load emotion classification model
+    print("\n[2/3] Loading emotion classification model...")
+    emotionModelPath = 'models/emotionModel.hdf5'
+    if not os.path.exists(emotionModelPath):
+        print(f"ERROR: Emotion model not found at {emotionModelPath}")
+        sys.exit(1)
+
+    emotionClassifier = load_model(emotionModelPath, compile=False)
+    emotionTargetSize = emotionClassifier.input_shape[1:3]
+    print(f" Emotion model loaded (input size: {emotionTargetSize})")
+
+    # Initialize webcam
+    print("\n[3/3] Initializing webcam...")
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+        print("ERROR: Could not open webcam")
+        sys.exit(1)
+
+    # Set camera properties
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 720)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    print(" Webcam initialized")
+
+    # Create display window
+    window_name = "Emotion Recognition - Press 'q' or ESC to quit"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+
+    print("\n" + "=" * 60)
+    print("SYSTEM READY - Webcam is now active")
+    print("=" * 60)
+    print("\nControls:")
+    print("  - Press 'q' or ESC to quit")
+    print("  - Press 's' to save current frame")
+    print("\nDetectable emotions:")
+    for emo_id, emo_data in emotions.items():
+        print(f"  - {emo_data['emotion']}")
+    print("\n")
+
+    frame_count = 0
+
+    try:
+        while True:
+            ret, frame = cap.read()
+
+            if not ret:
+                print("WARNING: Failed to grab frame")
+                break
+
+            frame_count += 1
+
+            # Convert to grayscale for face detection
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            # Detect faces using Haar Cascade
+            faces = face_cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.1,
+                minNeighbors=5,
+                minSize=(30, 30),
+                flags=cv2.CASCADE_SCALE_IMAGE
+            )
+
+            # Process each detected face
+            for (x, y, w, h) in faces:
+                # Extract face region
+                face_roi = gray[y:y+h, x:x+w]
+
+                # Skip if face is too small
+                if face_roi.size == 0:
+                    continue
+
+                try:
+                    # Resize face to model input size
+                    face_roi = cv2.resize(face_roi, emotionTargetSize)
+                except:
+                    continue
+
+                # Preprocess face for emotion classification
+                processedFace = preprocess_face(face_roi, emotionTargetSize)
+
+                # Predict emotion
+                emotion_prediction = emotionClassifier.predict(processedFace, verbose=0)
+                emotion_probability = np.max(emotion_prediction)
+
+                # Only show emotion if confidence is high enough
+                if emotion_probability > 0.36:
+                    emotion_label_arg = np.argmax(emotion_prediction)
+                    emotion_name = emotions[emotion_label_arg]['emotion']
+                    color = emotions[emotion_label_arg]['color']
+
+                    # Draw bounding box around face
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+
+                    # Create label background
+                    label_text = f"{emotion_name} ({emotion_probability*100:.1f}%)"
+                    label_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+
+                    # Draw label background
+                    cv2.rectangle(frame,
+                                (x, y - label_size[1] - 10),
+                                (x + label_size[0] + 10, y),
+                                color, -1)
+
+                    # Draw label text
+                    cv2.putText(frame, label_text,
+                              (x + 5, y - 5),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                              (255, 255, 255), 2, cv2.LINE_AA)
+                else:
+                    # Low confidence - just draw white box
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 255, 255), 2)
+
+            # Add frame counter and FPS info
+            info_text = f"Faces: {len(faces)} | Frame: {frame_count}"
+            cv2.putText(frame, info_text, (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            # Display the frame
+            cv2.imshow(window_name, frame)
+
+            # Handle keyboard input
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == 27 or key == ord('q'):  # ESC or 'q' to quit
+                print("\nQuitting...")
+                break
+            elif key == ord('s'):  # 's' to save frame
+                filename = f"emotion_capture_{frame_count}.jpg"
+                cv2.imwrite(filename, frame)
+                print(f"Saved: {filename}")
+
+    except KeyboardInterrupt:
+        print("\n\nStopped by user (Ctrl+C)")
+
+    except Exception as e:
+        print(f"\nERROR: {e}")
+        import traceback
+        traceback.print_exc()
+
+    finally:
+        # Cleanup
+        print("\nCleaning up...")
+        cap.release()
+        cv2.destroyAllWindows()
+
+        # Force window closure (macOS fix)
+        for i in range(5):
+            cv2.waitKey(1)
+
+        print(" Cleanup complete")
+        print("\nThank you for using Emotion Detection System!")
+
+
+if __name__ == "__main__":
+    main()
