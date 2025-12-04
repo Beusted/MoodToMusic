@@ -16,9 +16,14 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import warnings
 warnings.filterwarnings('ignore')
 
+import tensorflow as tf
 from keras.models import load_model
 import numpy as np
 import cv2
+
+# Import mood-to-music components
+from emotion_logger import EmotionLogger
+from music_recommender import MusicRecommender, print_recommendation
 
 # Emotion labels and colors (BGR format for OpenCV)
 emotions = {
@@ -32,11 +37,19 @@ emotions = {
 }
 
 
-def preprocess_face(face_img, target_size):
-    """Preprocess face image for emotion classification"""
+def preprocess_face(face_img, manual_scaling=False):
+    """
+    Preprocess face image for emotion classification.
+    Applies manual scaling only if the model doesn't have a built-in Rescaling layer.
+    """
     face_img = face_img.astype('float32')
-    face_img = face_img / 255.0
-    face_img = (face_img - 0.5) * 2.0
+
+    # Apply legacy scaling for models that require it
+    if manual_scaling:
+        face_img = face_img / 255.0
+        face_img = (face_img - 0.5) * 2.0
+
+    # Always expand dimensions for model input
     face_img = np.expand_dims(face_img, 0)
     face_img = np.expand_dims(face_img, -1)
     return face_img
@@ -58,16 +71,34 @@ def main():
 
     print(" Face detection model loaded (Haar Cascade)")
 
-    # Load emotion classification model
+    # --- Smart Model Loading ---
+    # Load a model and automatically determine its preprocessing needs.
+    # The best model is the default, but you can change this path.
     print("\n[2/3] Loading emotion classification model...")
-    emotionModelPath = 'models/emotionModel.hdf5'
+    emotionModelPath = 'models/emotion_detection/custom_model_weighted.h5'
+    # To test other models, change the path above, e.g., to:
+    # emotionModelPath = 'models/emotion_detection/emotionModel.hdf5'
+    # emotionModelPath = 'models/emotion_detection/custom_model.h5'
+
     if not os.path.exists(emotionModelPath):
         print(f"ERROR: Emotion model not found at {emotionModelPath}")
+        print("Please ensure you have trained the model by running train.py")
         sys.exit(1)
 
     emotionClassifier = load_model(emotionModelPath, compile=False)
     emotionTargetSize = emotionClassifier.input_shape[1:3]
-    print(f" Emotion model loaded (input size: {emotionTargetSize})")
+    
+    # Check if the model has a built-in rescaling layer
+    needs_manual_scaling = not isinstance(emotionClassifier.layers[0], tf.keras.layers.Rescaling)
+    
+    print(f" Emotion model loaded: {os.path.basename(emotionModelPath)}")
+    print(f"  - Input size: {emotionTargetSize}")
+    print(f"  - Needs manual preprocessing: {needs_manual_scaling}")
+
+    # Initialize emotion logger and music recommender
+    print("\n[Bonus] Initializing mood-to-music recommendation system...")
+    emotion_logger = EmotionLogger(log_interval=1.0, aggregation_period=60.0)
+    music_recommender = MusicRecommender(csv_path='muse_v3.csv', models_dir='models/')
 
     # Initialize webcam
     print("\n[3/3] Initializing webcam...")
@@ -126,8 +157,12 @@ def main():
                 flags=cv2.CASCADE_SCALE_IMAGE
             )
 
+            # If multiple faces, sort by area and track the largest one for mood logging
+            if len(faces) > 1:
+                faces = sorted(faces, key=lambda f: f[2]*f[3], reverse=True)
+
             # Process each detected face
-            for (x, y, w, h) in faces:
+            for face_idx, (x, y, w, h) in enumerate(faces):
                 # Extract face region
                 face_roi = gray[y:y+h, x:x+w]
 
@@ -141,8 +176,8 @@ def main():
                 except:
                     continue
 
-                # Preprocess face for emotion classification
-                processedFace = preprocess_face(face_roi, emotionTargetSize)
+                # Preprocess face for emotion classification, applying scaling if needed
+                processedFace = preprocess_face(face_roi, manual_scaling=needs_manual_scaling)
 
                 # Predict emotion
                 emotion_prediction = emotionClassifier.predict(processedFace, verbose=0)
@@ -153,6 +188,10 @@ def main():
                     emotion_label_arg = np.argmax(emotion_prediction)
                     emotion_name = emotions[emotion_label_arg]['emotion']
                     color = emotions[emotion_label_arg]['color']
+
+                    # Update emotion logger (only for the largest face)
+                    if face_idx == 0:
+                        emotion_logger.update_current_emotion(emotion_label_arg, emotion_probability)
 
                     # Draw bounding box around face
                     cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
@@ -180,6 +219,29 @@ def main():
             info_text = f"Faces: {len(faces)} | Frame: {frame_count}"
             cv2.putText(frame, info_text, (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            # Emotion logging (every 1 second)
+            if emotion_logger.should_log():
+                emotion_logger.log_emotion()
+
+            # Check for 60-second aggregation
+            if emotion_logger.should_aggregate():
+                prevalent_mood = emotion_logger.get_prevalent_mood()
+                if prevalent_mood:
+                    print(f"\n{'='*70}")
+                    print(f"60-SECOND MOOD SUMMARY")
+                    print(f"{'='*70}")
+                    print(f"Prevalent Mood: {prevalent_mood['emotion_name']}")
+                    print(f"Occurrences: {prevalent_mood['count']}/{prevalent_mood['total_samples']}")
+                    print(f"Average Confidence: {prevalent_mood['avg_confidence']*100:.1f}%")
+                    print(f"{'='*70}\n")
+
+                    # Get music recommendation
+                    recommendation = music_recommender.recommend(prevalent_mood)
+                    if recommendation:
+                        print_recommendation(recommendation, prevalent_mood)
+
+                emotion_logger.reset_cycle()
 
             # Display the frame
             cv2.imshow(window_name, frame)

@@ -23,6 +23,11 @@ source venv/bin/activate
 ```bash
 pip install -r requirements.txt
 ```
+### 2.5. (Optional Step) Train the model
+
+```bash
+python3 train.py
+```
 
 ### 3. Run the application
 
