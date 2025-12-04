@@ -105,6 +105,9 @@ def main():
         while True:
             ret, frame = cap.read()
 
+            # Flip frame horizontally to mirror the camera
+            frame = cv2.flip(frame, 1)
+
             if not ret:
                 print("WARNING: Failed to grab frame")
                 break
